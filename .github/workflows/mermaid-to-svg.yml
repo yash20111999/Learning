@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - '**.md'           # runs only when a markdown file changes
-
+    workflow_dispatch:
 permissions:
   contents: write         # needed to commit SVGs back to the repo
 
