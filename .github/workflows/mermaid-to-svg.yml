@@ -1,0 +1,177 @@
+name: Convert Mermaid Diagrams to SVG
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**.md'           # runs only when a markdown file changes
+
+permissions:
+  contents: write         # needed to commit SVGs back to the repo
+
+jobs:
+  convert-mermaid:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout the repo ─────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Install Node.js ───────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── 3. Install Mermaid CLI + headless Chromium ───────────────────────
+      - name: Install Mermaid CLI
+        run: npm install -g @mermaid-js/mermaid-cli
+
+      # ── 4. Install Chromium (needed by Puppeteer inside mmdc) ────────────
+      - name: Install Chromium dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            chromium-browser \
+            libgbm-dev \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgles2
+
+      # ── 5. Extract Mermaid blocks and convert to SVG ─────────────────────
+      - name: Extract and convert Mermaid diagrams
+        run: |
+          #!/bin/bash
+          set -e
+
+          # Find all markdown files in the repo
+          MD_FILES=$(find . -name "*.md" -not -path "./.git/*")
+
+          for MD_FILE in $MD_FILES; do
+            echo "Processing: $MD_FILE"
+
+            # Get the directory of the markdown file
+            MD_DIR=$(dirname "$MD_FILE")
+            MD_BASENAME=$(basename "$MD_FILE" .md)
+
+            # Create a diagrams folder next to the markdown file
+            DIAGRAM_DIR="$MD_DIR/diagrams"
+            mkdir -p "$DIAGRAM_DIR"
+
+            # Extract mermaid blocks using awk
+            # Each block is saved as a separate .mmd file
+            awk '
+              /^```mermaid/ { in_block=1; block_content=""; next }
+              /^```/ && in_block { 
+                in_block=0
+                count++
+                print block_content > "/tmp/diagram_" count ".mmd"
+              }
+              in_block { block_content = block_content "\n" $0 }
+            ' "$MD_FILE"
+
+            # Convert each extracted .mmd file to SVG
+            for MMD_FILE in /tmp/diagram_*.mmd; do
+              [ -f "$MMD_FILE" ] || continue
+              NUM=$(echo "$MMD_FILE" | grep -o '[0-9]*')
+              SVG_NAME="${MD_BASENAME}_diagram_${NUM}.svg"
+              SVG_PATH="$DIAGRAM_DIR/$SVG_NAME"
+
+              echo "  Converting diagram $NUM → $SVG_NAME"
+
+              PUPPETEER_EXECUTABLE_PATH=$(which chromium-browser) \
+              mmdc \
+                -i "$MMD_FILE" \
+                -o "$SVG_PATH" \
+                -b transparent \
+                --quiet \
+              || echo "  Warning: diagram $NUM failed to convert, skipping"
+
+              # Clean up temp file
+              rm -f "$MMD_FILE"
+            done
+          done
+
+      # ── 6. Replace mermaid blocks in MD files with SVG image refs ────────
+      - name: Update markdown files with SVG image references
+        run: |
+          python3 << 'EOF'
+          import re
+          import os
+          import glob
+
+          def replace_mermaid_with_svg(md_path):
+              with open(md_path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+
+              md_dir = os.path.dirname(md_path)
+              md_basename = os.path.basename(md_path).replace('.md', '')
+              diagram_dir = os.path.join(md_dir, 'diagrams')
+
+              # Find all mermaid blocks
+              pattern = r'```mermaid\n(.*?)```'
+              blocks = re.findall(pattern, content, re.DOTALL)
+
+              if not blocks:
+                  return False  # nothing to replace
+
+              modified = content
+              counter = 1
+
+              for block in blocks:
+                  svg_name = f"{md_basename}_diagram_{counter}.svg"
+                  svg_path = os.path.join(diagram_dir, svg_name)
+
+                  if os.path.exists(svg_path):
+                      # Use relative path from the md file's location
+                      rel_path = os.path.relpath(svg_path, md_dir)
+                      replacement = f"![Diagram {counter}]({rel_path})"
+                      old_block = f"```mermaid\n{block}```"
+                      modified = modified.replace(old_block, replacement, 1)
+                      print(f"  Replaced diagram {counter} in {md_path}")
+                  else:
+                      print(f"  SVG not found for diagram {counter}, keeping original block")
+
+                  counter += 1
+
+              if modified != content:
+                  with open(md_path, 'w', encoding='utf-8') as f:
+                      f.write(modified)
+                  return True
+
+              return False
+
+          # Process all markdown files
+          md_files = glob.glob('./**/*.md', recursive=True)
+          md_files = [f for f in md_files if '.git' not in f]
+
+          changed = []
+          for md_file in md_files:
+              print(f"Checking: {md_file}")
+              if replace_mermaid_with_svg(md_file):
+                  changed.append(md_file)
+
+          print(f"\nUpdated {len(changed)} file(s):")
+          for f in changed:
+              print(f"  {f}")
+          EOF
+
+      # ── 7. Commit SVGs and updated MD files back to the repo ─────────────
+      - name: Commit generated SVGs and updated markdown
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          git add -A
+
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit — all diagrams already up to date"
+          else
+            git commit -m "chore: auto-convert Mermaid diagrams to SVG [skip ci]"
+            git push
+          fi
