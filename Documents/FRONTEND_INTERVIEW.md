@@ -2,7 +2,6 @@
 ### For Engineers with 3–5 Years Experience
 
 > **Philosophy:** Systems understood visually are systems understood deeply.
-> Every concept here is diagram-first. Read flows, not definitions.
 
 ---
 
