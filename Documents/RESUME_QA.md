@@ -31,6 +31,26 @@
 
 > We tracked it via Datadog APM — specifically the total outbound request count per user session and the p95 response time on the affected endpoints. Before the change I captured a baseline over two weeks. After rolling out the GraphQL consolidation and adding a short-lived in-memory cache for repeated queries, I compared the same metrics over the following two weeks. The reduction in call count was consistent across both weeks, which gave me confidence it wasn't just a traffic anomaly.
 
+**Q: How do you defend the GraphQL data model you designed?**
+
+> Before migrating an endpoint to GraphQL, I had to think carefully about schema design — specifically, how to model the DICOM study data so that all the different viewport needs could be satisfied from a single graph without creating awkward resolver chains. I kept the schema close to the domain model (Study → Series → Instance) rather than designing it around any one UI view, which made it flexible enough that each viewport could query exactly the fields it needed without me having to anticipate every combination upfront. A poorly designed schema leads to deeply nested queries that cause N+1 problems at the resolver level. I avoided this by keeping types flat where possible, using DataLoader to batch and deduplicate DB calls within a single query execution, and setting query depth and complexity limits to prevent clients from accidentally hammering the DB with an expensive nested query.
+
+| Risk | How I addressed it |
+|---|---|
+| N+1 queries | DataLoader for batching resolver DB calls |
+| Overly deep nesting | Keep types flat; limit query depth |
+| Abusive queries | Query complexity limits / query cost analysis |
+| Schema drift | Schema-first design, versioned via SDL files in Git |
+| Over-flexible schema | Model around domain entities, not UI views |
+
+**Q: Why not just use tables and REST for DICOM data?**
+
+> You absolutely can — and many systems do. The question is what it costs at query time. In our case, a single REST call to load a viewport needed data from all four levels — Patient, Study, Series, Instance. With REST over relational tables you'd either make 4 separate calls (waterfall, slow), or write a custom joined endpoint for every viewport combination. We had multiple viewport layouts — single, quad, compare — each needing a different shape of data. That meant maintaining many custom endpoints and updating them every time the UI changed. GraphQL let the UI declare what it needed and we maintained one schema instead of N endpoints. REST didn't go away — we still used it for simple CRUD operations like creating a study or updating patient details. The rule was simple: if the query shape varies by caller, GraphQL. If it's always the same, REST.
+
+**Q: The DICOM structure is a tree — is that why you used GraphQL?**
+
+> Exactly. DICOM has a natural tree structure — Patient → Study → Series → Instance. A tree is a type of graph, and GraphQL's hierarchical query model maps directly onto that structure. Different clients needed different depths of that tree — a worklist just needs Patient and Study, a viewport needs all the way down to Instance. GraphQL let each client declare exactly how deep it wanted to go, which is what made it a natural fit. And to be precise — GraphQL is named for the idea of querying your data as a graph of interconnected types, not because it uses a graph database underneath. Our actual data still lived in MongoDB — GraphQL was just the query layer that let clients traverse the relationships flexibly.
+
 ---
 
 #### Node.js Document Processing
@@ -376,3 +396,5 @@ User: [raw transcript here]
 | 25% | Faster dev cycles with micro-frontends |
 
 ---
+
+*Good luck, Yash!*
